@@ -1,13 +1,10 @@
-#!/usr/bin/env pythonimport datetime, os, time, yaml, sys
+#!/usr/bin/env python
+import datetime, os, time, yaml, sys
 import json
 import matplotlib.pyplot as plt
 import numpy as np
 from io import StringIO
 import tensorflow as tf
-import time
-from __future__ import print_function
-import sys
-
 
 
 def add_opts(parser):
@@ -19,7 +16,7 @@ def add_opts(parser):
                        help="tf.train.XXXOptimizer to use")
    parser.add_argument('--optimiser-args', type=str, default="{\"learning_rate\": 0.001}",
                        help="json serialised args for optimiser constructor")
-   parser.add_argument('--use-dropout', action='store_true',
+   parser.add_argument('--use-dropout', default = False, action='store_true',
                        help="include a dropout layers after each fully connected layer")
 
 class StopWatch:
@@ -91,7 +88,7 @@ def shape_and_product_of(t):
 class SaverUtil(object):
   def __init__(self, sess, ckpt_dir="/tmp", save_freq=60):
     self.sess = sess
-    var_list = [v for v in tf.all_variables() if not "replay_memory" in v.name]
+    var_list = [v for v in tf.global_variables() if not "replay_memory" in v.name]
     self.saver = tf.train.Saver(var_list=var_list, max_to_keep=1000)
     self.ckpt_dir = ckpt_dir
     if not os.path.exists(self.ckpt_dir):
@@ -115,7 +112,7 @@ class SaverUtil(object):
     else:
       # no latest ckpts, init and force a save now
       sys.stderr.write("no latest ckpt in %s, just initing vars...\n" % self.ckpt_dir)
-      self.sess.run(tf.initialize_all_variables())
+      self.sess.run(tf.global_variables_initializer())
       self.force_save()
 
   def force_save(self):
@@ -191,6 +188,3 @@ def render_action_to_png(step, action):
   lx, ly = int(25+(action[0][0]*25)), int(25+(action[0][1]*25))
   canvas.line((25,25, lx,ly), fill="black")
   img.save("/tmp/action_%03d.png" % step)
-
-def eprint(*args, **kwargs) :
-  print(*args, file=sys.stderr, **kwargs)

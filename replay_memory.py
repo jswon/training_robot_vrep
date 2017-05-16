@@ -9,7 +9,7 @@ import util
 Batch = collections.namedtuple("Batch", "state_1 action reward terminal_mask state_2")
 
 class ReplayMemory(object):
-  def __init__(self, buffer_size, state_shape, action_dim, load_factor=1.5):
+  def __init__(self, buffer_size, state_shape, action_dim, opts, load_factor=1.5):
     assert load_factor >= 1.5, "load_factor has to be at least 1.5"
     self.buffer_size = buffer_size
     self.state_shape = state_shape
@@ -23,6 +23,14 @@ class ReplayMemory(object):
     self.reward = np.empty((buffer_size, 1), dtype=np.float32)
     self.terminal_mask = np.empty((buffer_size, 1), dtype=np.float32)
     self.state_2_idx = np.empty(buffer_size, dtype=np.int32)
+
+    if opts.use_full_internal_state:
+      internal_state_dim = opts.internal_state_dim
+    else:
+      internal_state_dim = 9
+
+    self.internal_state = np.empty((buffer_size, internal_state_dim), dtype=np.int32)
+    self.target_obj = np.empty((buffer_size, 10), dtype=np.int32)
 
     # states themselves, since they can either be state_1 or state_2 in an event
     # are stored in a separate matrix. it is sized fractionally larger than the replay

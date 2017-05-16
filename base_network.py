@@ -22,7 +22,7 @@ class Network(object):
     assert affine_combo_coeff >= 0.0 and affine_combo_coeff <= 1.0
     assign_ops = []
     with tf.variable_scope(self.namespace, reuse=True):
-      for src_var in tf.all_variables():
+      for src_var in tf.global_variables():
         if not src_var.name.startswith(source_namespace):
           continue
         target_var_name = src_var.name.replace(source_namespace+"/", "").replace(":0", "")
@@ -50,7 +50,7 @@ class Network(object):
 
   def trainable_model_vars(self):
     v = []
-    for var in tf.all_variables():
+    for var in tf.global_variables():
       if var.name.startswith(self.namespace):
         v.append(var)
     return v
@@ -90,7 +90,7 @@ class Network(object):
     height, width = map(int, input_layer.get_shape()[1:3])
     num_channels = input_layer.get_shape()[3:].num_elements()
     input_layer = tf.reshape(input_layer, [-1, height, width, num_channels])
-    print >>sys.stderr, "input_layer", util.shape_and_product_of(input_layer)
+    print("input_layer", util.shape_and_product_of(input_layer), file=sys.stderr)
 
     # whiten image, per channel, using batch_normalisation layer with
     # params calculated directly from batch.
@@ -108,7 +108,7 @@ class Network(object):
                         scope='conv1')
     model = slim.max_pool2d(model, kernel_size=[2, 2], scope='pool1')
     self.pool1 = model
-    print >>sys.stderr, "pool1", util.shape_and_product_of(model)
+    print("pool1", util.shape_and_product_of(model),file=sys.stderr)
 
     model = slim.conv2d(model, num_outputs=10, kernel_size=[5, 5],
                         normalizer_fn=normalizer_fn,
@@ -116,7 +116,7 @@ class Network(object):
                         scope='conv2')
     model = slim.max_pool2d(model, kernel_size=[2, 2], scope='pool2')
     self.pool2 = model
-    print >>sys.stderr, "pool2", util.shape_and_product_of(model)
+    print("pool2", util.shape_and_product_of(model),file=sys.stderr)
 
     model = slim.conv2d(model, num_outputs=10, kernel_size=[3, 3],
                         normalizer_fn=normalizer_fn,
@@ -124,14 +124,13 @@ class Network(object):
                         scope='conv3')
     model = slim.max_pool2d(model, kernel_size=[2, 2], scope='pool2')
     self.pool3 = model
-    print >>sys.stderr, "pool3", util.shape_and_product_of(model)
+    print("pool3", util.shape_and_product_of(model),file=sys.stderr)
 
     return model
 
-  def input_state_network(self, input_state, opts):
-    # TODO: use in lrpg and ddpg too
-    if opts.use_raw_pixels:
-      input_state = self.simple_conv_net_on(input_state, opts)
+  def input_state_network(self, input_state, internal_state, target_obj_pos, opts):
+    input_state = self.simple_conv_net_on(input_state, opts)
+
     flattened_input_state = slim.flatten(input_state, scope='flat')
     return self.hidden_layers_starting_at(flattened_input_state, opts.hidden_layers, opts)
 

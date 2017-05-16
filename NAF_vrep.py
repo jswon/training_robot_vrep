@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 import argparse
+import vrep_python_mod
 import collections
-import datetime
-from PIL import Image
-import datetime
-import vrep_python
+import gym
+import random
 import json
+import datetime
 import numpy as np
 import replay_memory
 import signal
@@ -13,12 +13,15 @@ import sys
 import tensorflow as tf
 import time
 import util
+import base_network
+import tensorflow.contrib.slim as slim
 
-# Parameter List
+# Parameter lists
 np.set_printoptions(precision=5, threshold=10000, suppress=True, linewidth=10000)
 
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument('--num-eval', type=int, default=0,
+
+parser.add_argument('--num-eval', type=int, default=0, # TODO : Test Phase
                     help="if >0 just run this many episodes with no training")
 parser.add_argument('--max-num-actions', type=int, default=0,
                     help="train for (at least) this number of actions (always finish"
@@ -26,10 +29,10 @@ parser.add_argument('--max-num-actions', type=int, default=0,
 parser.add_argument('--max-run-time', type=int, default=0,
                     help="train for (at least) this number of seconds (always finish"
                          " current episode) ignore if <=0")
-parser.add_argument('--ckpt-dir', type=str, default=None,
+parser.add_argument('--ckpt-dir', type=str, default='ckpt/test',
                     help="if set save ckpts to this dir")
 parser.add_argument('--ckpt-freq', type=int, default=3600, help="freq (sec) to save ckpts")
-parser.add_argument('--batch-size', type=int, default=128, help="training batch size")
+parser.add_argument('--batch-size', type=int, default=32, help="training batch size")
 parser.add_argument('--batches-per-step', type=int, default=5,
                     help="number of batches to train per step")
 parser.add_argument('--dont-do-rollouts', action="store_true",
@@ -38,35 +41,50 @@ parser.add_argument('--dont-do-rollouts', action="store_true",
 parser.add_argument('--target-update-rate', type=float, default=0.0001,
                     help="affine combo for updating target networks each time we run a"
                          " training batch")
-# TODO params per value, P, output_action networks?
-parser.add_argument('--share-input-state-representation', action='store_true',
+parser.add_argument('--share-input-state-representation', default=True, action='store_true',
                     help="if set we have one network for processing input state that is"
                          " shared between value, l_value and output_action networks. if"
                          " not set each net has it's own network.")
-parser.add_argument('--hidden-layers', type=str, default="100,50",
+parser.add_argument('--hidden-layers', type=str, default="200,200,50",
                     help="hidden layer sizes")
-parser.add_argument('--use-batch-norm', action='store_true',
+parser.add_argument('--use-batch-norm', default=False, action='store_true',
                     help="whether to use batch norm on conv layers")
 parser.add_argument('--discount', type=float, default=0.99,
                     help="discount for RHS of bellman equation update")
 parser.add_argument('--event-log-in', type=str, default=None,
                     help="prepopulate replay memory with entries from this event log")
-parser.add_argument('--replay-memory-size', type=int, default=22000,
+parser.add_argument('--replay-memory-size', type=int, default=11000,
                     help="max size of replay memory")
-parser.add_argument('--replay-memory-burn-in', type=int, default=1000,
+parser.add_argument('--replay-memory-burn-in', type=int, default=100,
                     help="dont train from replay memory until it reaches this size")
 parser.add_argument('--eval-action-noise', action='store_true',
                     help="whether to use noise during eval")
-parser.add_argument('--action-noise-theta', type=float, default=0.01,
+parser.add_argument('--action-noise-theta', type=float, default=0.1,
                     help="OrnsteinUhlenbeckNoise theta (rate of change) param for action"
                          " exploration")
-parser.add_argument('--action-noise-sigma', type=float, default=0.05,
+parser.add_argument('--action-noise-sigma', type=float, default=0.01,
                     help="OrnsteinUhlenbeckNoise sigma (magnitude) param for action"
                          " exploration")
 parser.add_argument('--gpu-mem-fraction', type=float, default=None,
                     help="if not none use only this fraction of gpu memory")
 
+parser.add_argument('--joint-angle-low-limit', type=float, default=-180,
+                    help="joint angle low limit for action")
+parser.add_argument('--joint-angle-high-limit', type=float, default=180,
+                    help="joint angle high limit for action")
+parser.add_argument('--action_dim', type=float, default=6,
+                    help="number of joint angle for robot action")
+parser.add_argument('--internal_state_dim', type=float, default=18,
+                    help="internal_state_dim")
+parser.add_argument('--action_repeat_per_scene', type=float, default=20,
+                    help="number of actions per a scene")
+parser.add_argument('--number_of_scenes_per_shuffle', type=float, default=10,
+                    help="number of scenes per a shuffle")
+parser.add_argument('--use-full-internal-state', default=False, action="store_true",
+                    help="whether to use full internal state")
+
 util.add_opts(parser)
+vrep_python_mod.add_opts(parser)
 
 opts = parser.parse_args()
 sys.stderr.write("%s\n" % opts)
@@ -75,8 +93,7 @@ sys.stderr.write("%s\n" % opts)
 
 # TODO: if we import slim before cartpole env we can't start bullet withGL gui o_O
 
-import base_network
-import tensorflow.contrib.slim as slim
+env = vrep_python_mod.sim_env(opts=opts)
 
 VERBOSE_DEBUG = False
 def toggle_verbose_debug(signal, frame):
@@ -86,7 +103,7 @@ signal.signal(signal.SIGUSR1, toggle_verbose_debug)
 
 DUMP_WEIGHTS = False
 def set_dump_weights(signal, frame):
-  global DUMP_WEIGHTS
+  global DUMP_WEIGHTSs
   DUMP_WEIGHTS = True
 signal.signal(signal.SIGUSR2, set_dump_weights)
 
@@ -94,15 +111,17 @@ signal.signal(signal.SIGUSR2, set_dump_weights)
 class ValueNetwork(base_network.Network):
   """ Value network component of a NAF network. Created as seperate net because it has a target network."""
 
-  def __init__(self, namespace, input_state, hidden_layer_config):
+  def __init__(self, namespace, input_state, internal_state, target_obj_pos, hidden_layer_config):
     super(ValueNetwork, self).__init__(namespace)
 
-    self.input_state = input_state
+    self.input_state = input_state  # image
+    self.internal_state = internal_state #
+    self.target_obj_pos = target_obj_pos
 
     with tf.variable_scope(namespace):
       # expose self.input_state_representation since it will be the network "shared"
       # by l_value & output_action network when running --share-input-state-representation
-      self.input_state_representation = self.input_state_network(input_state, opts)
+      self.input_state_representation = self.input_state_network(input_state,internal_state, target_obj_pos, opts)
       self.value = slim.fully_connected(scope='fc',
                                         inputs=self.input_state_representation,
                                         num_outputs=1,
@@ -116,7 +135,6 @@ class ValueNetwork(base_network.Network):
 
 
 class NafNetwork(base_network.Network):
-
   def __init__(self, namespace,
                input_state, input_state_2,
                value_net, target_value_net,
@@ -223,8 +241,7 @@ class NafNetwork(base_network.Network):
 
       # target y is reward + discounted target value
       # TODO: pull discount out
-      self.target_y = self.reward + (self.terminal_mask * opts.discount * \
-                                     target_value_net.value)
+      self.target_y = self.reward + (self.terminal_mask * opts.discount * target_value_net.value)
       self.target_y = tf.stop_gradient(self.target_y)
 
       # loss is squared difference that we want to minimise.
@@ -245,13 +262,15 @@ class NafNetwork(base_network.Network):
         checks.append(tf.check_numerics(op, name))
       self.check_numerics = tf.group(*checks)
 
-  def action_given(self, state, add_noise):
+  def action_given(self, state, internal_state, target_obj, add_noise):
     # NOTE: noise is added _outside_ tf graph. we do this simply because the noisy output
     # is never used for any part of computation graph required for online training. it's
     # only used during training after being the replay buffer.
     actions = tf.get_default_session().run(self.output_action,
                                            feed_dict={self.input_state: [state],
                                                       base_network.IS_TRAINING: False})
+
+    # May be input dimension problem
 
     if add_noise:
       if VERBOSE_DEBUG:
@@ -288,25 +307,36 @@ class NafNetwork(base_network.Network):
 class NormalizedAdvantageFunctionAgent(object):
   def __init__(self, env):
     self.env = env
-    state_shape = self.env.observation_space.shape
+    state_shape = self.env.state_shape
     action_dim = self.env.action_space.shape[1]
 
     # for now, with single machine synchronous training, use a replay memory for training.
     # TODO: switch back to async training with multiple replicas (as in drivebot project)
     self.replay_memory = replay_memory.ReplayMemory(opts.replay_memory_size,
-                                                    state_shape, action_dim)
+                                                    state_shape, action_dim, opts)
 
     # s1 and s2 placeholders
     batched_state_shape = [None] + list(state_shape)
     s1 = tf.placeholder(shape=batched_state_shape, dtype=tf.float32)
     s2 = tf.placeholder(shape=batched_state_shape, dtype=tf.float32)
 
+    if opts.use_full_internal_state:
+        temp = [18]
+    else:
+        temp = [9]
+
+    batched_internal_state_shape = [None] + temp
+    internal_state = tf.placeholder(shape=batched_internal_state_shape, dtype=tf.float32)
+    temp = [10]
+    batched_taget_obj_shape = [None] + temp
+    target_obj = tf.placeholder(shape=batched_taget_obj_shape, dtype=tf.float32)
+
     # initialise base models for value & naf networks. value subportion of net is
     # explicitly created seperate because it has a target network note: in the case of
     # --share-input-state-representation the input state network of the value_net will
     # be reused by the naf.l_value and naf.output_actions net
-    self.value_net = ValueNetwork("value", s1, opts.hidden_layers)
-    self.target_value_net = ValueNetwork("target_value", s2, opts.hidden_layers)
+    self.value_net = ValueNetwork("value", s1, internal_state, target_obj, opts.hidden_layers)
+    self.target_value_net = ValueNetwork("target_value", s2, internal_state, target_obj, opts.hidden_layers)
     self.naf = NafNetwork("naf", s1, s2,
                           self.value_net, self.target_value_net,
                           action_dim)
@@ -321,6 +351,10 @@ class NormalizedAdvantageFunctionAgent(object):
     self.target_value_net.set_as_target_network_for(self.value_net,
                                                     opts.target_update_rate)
 
+  def one_hot_encode(self, x, n):
+
+    return np.eye(n)[x]
+
   def run_training(self, max_num_actions, max_run_time, batch_size, batches_per_step,
                    saver_util):
     # log start time, in case we are limiting by time...
@@ -329,6 +363,11 @@ class NormalizedAdvantageFunctionAgent(object):
     # run for some max number of actions
     num_actions_taken = 0
     n = 0
+
+    obj_list = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    n_obj = 10
+    one_hot_list = self.one_hot_encode(obj_list, n_obj)
+
     while True:
       rewards = []
       losses = []
@@ -338,27 +377,43 @@ class NormalizedAdvantageFunctionAgent(object):
         # _not_ gathering experience online
         pass
       else:
-        # start a new episode
-        state_1 = self.env.reset()
-        # prepare data for updating replay memory at end of episode
-        initial_state = np.copy(state_1)
-        action_reward_state_sequence = []
-        episode_start = time.time()
-        done = False
-        while not done:
-          # choose action
-          action = self.naf.action_given(state_1, add_noise=True)
-          # take action step in env
-          state_2, reward, done, _ = self.env.step(action)
-          rewards.append(reward)
-          # cache for adding to replay memory
-          action_reward_state_sequence.append((action, reward, np.copy(state_2)))
-          # roll state for next step.
-          state_1 = state_2
-        # at end of episode update replay memory
-        print("episode_took", time.time() - episode_start, len(rewards))
+        env.shuffle_obj()
+        print('Shuffled objects')
 
-        replay_add_start = time.time()
+        obj_index = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+        for i in range(10, 0, -1):
+            target_obj_idx = random.randrange(0, i)
+            objects_name = env.obj_list[target_obj_idx]
+
+            print('Target object:', objects_name)
+            # start a new episode
+            state_1 = self.env.reset()
+
+            # prepare data for updating replay memory at end of episode
+            initial_state = np.copy(state_1)
+            action_reward_state_sequence = []
+
+            done = False
+            step = 0
+
+            episode_start = time.time()
+            while not done:
+              # choose action
+              internal_state = env.internal_state
+              target_obj = one_hot_list[target_obj_idx, :]
+              action = self.naf.action_given(state_1, internal_state, target_obj, add_noise=True) # Make action
+              # take action step in env
+              state_2, reward, done, _ = self.env.step(action, target_obj_idx)
+              rewards.append(reward)
+              # cache for adding to replay memory
+              action_reward_state_sequence.append((action, reward, np.copy(state_2)))
+              # roll state for next step.
+              state_1 = state_2
+            # at end of episode update replay memory
+            print("episode_took", time.time() - episode_start, len(rewards))
+
+            replay_add_start = time.time()
         self.replay_memory.add_episode(initial_state, action_reward_state_sequence)
         print("replay_took", time.time() - replay_add_start)
 
@@ -450,10 +505,11 @@ class NormalizedAdvantageFunctionAgent(object):
     fn = "/tmp/weights.%s" % time.time()
     with open(fn, "w") as f:
       f.write("DUMP time %s\n" % time.time())
-      for var in tf.all_variables():
+      for var in tf.global_variables():
         f.write("VAR %s %s\n" % (var.name, var.get_shape()))
         f.write("%s\n" % var.eval())
     print("weights written to", fn)
+
 
 def main():
   config = tf.ConfigProto()
@@ -472,7 +528,7 @@ def main():
       sess.run(tf.global_variables_initializer())
 
     for v in tf.global_variables():
-      print(sys.stderr, v.name, util.shape_and_product_of(v))
+      print(v.name, util.shape_and_product_of(v),file=sys.stderr)
 
     # now that we've either init'd from scratch, or loaded up a checkpoint,
     # we can do any required post init work.
@@ -488,7 +544,11 @@ def main():
       if saver_util is not None:
         saver_util.force_save()
 
-    vrep_python.shutdown()
+    env.shutdown()  # just to flush logging, clumsy :/
 
 if __name__ == "__main__":
-  main()
+    try :
+        main()
+    except :
+        # TODO : Adds saver.
+        env.shutdown()
