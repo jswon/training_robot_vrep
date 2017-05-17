@@ -6,7 +6,7 @@ import tensorflow as tf
 import time
 import util
 
-Batch = collections.namedtuple("Batch", "state_1 action reward terminal_mask state_2")
+Batch = collections.namedtuple("Batch", "state_1 action reward terminal_mask state_2 internal_state target_obj_hot")
 
 class ReplayMemory(object):
   def __init__(self, buffer_size, state_shape, action_dim, opts, load_factor=1.5):
@@ -30,7 +30,7 @@ class ReplayMemory(object):
       internal_state_dim = 9
 
     self.internal_state = np.empty((buffer_size, internal_state_dim), dtype=np.int32)
-    self.target_obj = np.empty((buffer_size, 10), dtype=np.int32)
+    self.target_obj_hot = np.empty((buffer_size, 10), dtype=np.int32)
 
     # states themselves, since they can either be state_1 or state_2 in an event
     # are stored in a separate matrix. it is sized fractionally larger than the replay
@@ -73,12 +73,12 @@ class ReplayMemory(object):
     assert len(action_reward_state_sequence) > 0
     state_1_idx = self.state_free_slots.pop(0)
     self.state[state_1_idx] = initial_state
-    for n, (action, reward, state_2) in enumerate(action_reward_state_sequence):
+    for n, (action, reward, state_2, internal_state, target_obj) in enumerate(action_reward_state_sequence):
       terminal = n == len(action_reward_state_sequence)-1
-      state_2_idx = self._add(state_1_idx, action, reward, terminal, state_2)
+      state_2_idx = self._add(state_1_idx, action, reward, terminal, state_2, internal_state, target_obj)
       state_1_idx = state_2_idx
 
-  def _add(self, s1_idx, a, r, t, s2):
+  def _add(self, s1_idx, a, r, t, s2, i_s, t_o):
 #    print(">add s1_idx=%s, a=%s, r=%s, t=%s" % (s1_idx, a, r, t)
 
     self.stats['>add'] += 1
@@ -113,6 +113,9 @@ class ReplayMemory(object):
     self.state_2_idx[self.insert] = s2_idx
     self.state[s2_idx] = s2
 
+    self.internal_state[self.insert] = i_s
+    self.target_obj_hot[self.insert] = t_o
+
     # move insert ptr forward
     self.insert += 1
     if self.insert >= self.buffer_size:
@@ -143,7 +146,9 @@ class ReplayMemory(object):
                  np.copy(self.action[idxs]),
                  np.copy(self.reward[idxs]),
                  np.copy(self.terminal_mask[idxs]),
-                 np.copy(self.state[self.state_2_idx[idxs]]))
+                 np.copy(self.state[self.state_2_idx[idxs]]),
+                 np.copy(self.internal_state[idxs]),
+                 np.copy(self.target_obj_hot[idxs]))
 
   def dump(self):
     print(">>>> dump")
@@ -156,13 +161,13 @@ class ReplayMemory(object):
       idxs = range(self.buffer_size if self.full else self.insert)
       for idx in idxs:
         print("idx", idx,)
-        print("state_1_idx", self.state_1_idx[idx],)
-        print("state_1", self.state[self.state_1_idx[idx]])
-        print("action", self.action[idx],)
-        print("reward", self.reward[idx],)
-        print("terminal_mask", self.terminal_mask[idx],)
-        print("state_2_idx", self.state_2_idx[idx])
-        print("state_2", self.state[self.state_2_idx[idx]])
+        # print("state_1_idx", self.state_1_idx[idx],)
+        # print("state_1", self.state[self.state_1_idx[idx]])
+        # print("action", self.action[idx],)
+        # print("reward", self.reward[idx],)
+        # print("terminal_mask", self.terminal_mask[idx],)
+        # print("state_2_idx", self.state_2_idx[idx])
+        # print("state_2", self.state[self.state_2_idx[idx]])
     print("<<<< dump")
 
   def current_stats(self):

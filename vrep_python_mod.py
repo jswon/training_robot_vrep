@@ -152,9 +152,10 @@ class sim_env(object):
         self.steps += 1
         self.done = False
 
-        obj_pos = self.get_obj_pos(target_obj_idx)
-        obj_pos[2] = obj_pos[2] + 0.5  # check!!!!!
+        obj_pos = list(self.get_obj_pos(target_obj_idx))[1]
         endEffector_pos = self.get_end_pos()
+
+        obj_pos[2] = obj_pos[2] + 0.5  # check!!!!!
 
         dist = np.linalg.norm(np.array(obj_pos) - np.array(endEffector_pos))
         dist = math.sqrt(dist)
@@ -173,21 +174,19 @@ class sim_env(object):
         ########################
 
 
-        prev_end_effector_pos = self.cur_end_effector_pos
-        self.cur_end_effector_pos = np.asarray(endEffector_pos)
-        self.end_effector_vel = self.cur_end_effector_pos - prev_end_effector_pos
-        prev_joint_angles = self.cur_joint_angles
-        self.cur_joint_angles = self.get_joint_angles()
-        self.joint_angles_vel = self.cur_joint_angles - prev_joint_angles
-
-
         if self.opts.use_full_internal_state:
+            prev_end_effector_pos = self.cur_end_effector_pos
+            self.cur_end_effector_pos = np.asarray(endEffector_pos)
+            self.end_effector_vel = self.cur_end_effector_pos - prev_end_effector_pos
+            prev_joint_angles = self.cur_joint_angles
+            self.cur_joint_angles = self.get_joint()
+            self.joint_angles_vel = self.cur_joint_angles - prev_joint_angles
             self.internal_state = np.concatenate(
                 (self.cur_joint_angles, self.joint_angles_vel, self.cur_end_effector_pos, self.end_effector_vel))
         else:
             self.internal_state = np.concatenate((self.cur_joint_angles, self.cur_end_effector_pos))
 
-        collision_type = self.collsion_read()
+        collision_type = self.collision_read()
 
         if collision_type == 1:
             reward = -100.0
@@ -205,7 +204,7 @@ class sim_env(object):
     def reset(self):
         self.steps = 0
         self.done = False
-        self.movejoint([0, 0, 90, 90, 0, 0]) # Go to initial angles
+        self.movejoint([0, 0, 0, 0, 0, 0]) # Go to initial angles
 
         self.set_state_element(repeat=1)
 
@@ -282,7 +281,6 @@ class sim_env(object):
         assert self.clientID != -1, 'Failed to connect to the V-rep server'
 
         if obj_idx in range(len(self.handle_obj)):
-            print('objGETPOS')
             return vrep.simxGetObjectPosition(self.clientID, self.handle_obj[obj_idx], self.handle_robot,
                                               vrep.simx_opmode_buffer)
 
@@ -379,12 +377,12 @@ class sim_env(object):
                 err, collision = vrep.simxReadCollision(self.clientID, self.handle_collision[i], vrep.simx_opmode_buffer)
 
                 if err == vrep.simx_return_ok:
-                    print('collision information imported')
+                    #print('collision information imported')
                     if (collision == True and i < 92):
-                        print('Tray collision or Object collision detected')
+                        #print('Tray collision or Object collision detected')
                         return 1  # tray collision or object collision detected => break
                     elif (collision == True and i > 91):
-                        print('Self collision detected')
+                        #print('Self collision detected')
                         return 2  # self collision detected => negative reward
                     else:
                         break
@@ -395,21 +393,16 @@ class sim_env(object):
                     print('Error')
                     print(err)
 
-        print('No Collision')
+        #print('No Collision')
 
         return 0  # no collision
 
-    def remove_obj(self):
-        if not shuffle_num:
-            for i in range(10):
-                shuffle_num.append(i)
+    def remove_obj(self, remove_obj_idx):
+        assert self.clientID != -1, 'Failed to connect to the V-rep server'
 
-        random_num = random.randrange(0, len(shuffle_num))
-        vrep.simxSetObjectPosition(self.clientID, self.handle_obj[shuffle_num[random_num]],
+        vrep.simxSetObjectPosition(self.clientID, self.handle_obj[remove_obj_idx],
                                    self.handle_robot, [0.8, 0, 0],
                                    vrep.simx_opmode_oneshot)
-
-        del shuffle_num[random_num]
 
     def send(self):
         vrep.simxSynchronousTrigger(self.clientID)

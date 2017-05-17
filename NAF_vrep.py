@@ -41,7 +41,7 @@ parser.add_argument('--dont-do-rollouts', action="store_true",
 parser.add_argument('--target-update-rate', type=float, default=0.0001,
                     help="affine combo for updating target networks each time we run a"
                          " training batch")
-parser.add_argument('--share-input-state-representation', default=True, action='store_true',
+parser.add_argument('--share-input-state-representation', default=False, action='store_true',
                     help="if set we have one network for processing input state that is"
                          " shared between value, l_value and output_action networks. if"
                          " not set each net has it's own network.")
@@ -55,7 +55,7 @@ parser.add_argument('--event-log-in', type=str, default=None,
                     help="prepopulate replay memory with entries from this event log")
 parser.add_argument('--replay-memory-size', type=int, default=11000,
                     help="max size of replay memory")
-parser.add_argument('--replay-memory-burn-in', type=int, default=100,
+parser.add_argument('--replay-memory-burn-in', type=int, default=10,
                     help="dont train from replay memory until it reaches this size")
 parser.add_argument('--eval-action-noise', action='store_true',
                     help="whether to use noise during eval")
@@ -111,33 +111,35 @@ signal.signal(signal.SIGUSR2, set_dump_weights)
 class ValueNetwork(base_network.Network):
   """ Value network component of a NAF network. Created as seperate net because it has a target network."""
 
-  def __init__(self, namespace, input_state, internal_state, target_obj_pos, hidden_layer_config):
+  def __init__(self, namespace, input_state, internal_state, target_obj_hot, hidden_layer_config):
     super(ValueNetwork, self).__init__(namespace)
 
     self.input_state = input_state  # image
     self.internal_state = internal_state #
-    self.target_obj_pos = target_obj_pos
+    self.target_obj_hot = target_obj_hot
 
     with tf.variable_scope(namespace):
       # expose self.input_state_representation since it will be the network "shared"
       # by l_value & output_action network when running --share-input-state-representation
-      self.input_state_representation = self.input_state_network(input_state,internal_state, target_obj_pos, opts)
+      self.input_state_representation = self.input_state_network(input_state, internal_state, target_obj_hot, opts)
       self.value = slim.fully_connected(scope='fc',
                                         inputs=self.input_state_representation,
                                         num_outputs=1,
                                         weights_regularizer=tf.contrib.layers.l2_regularizer(0.01),
                                         activation_fn=None)  # (batch, 1)
 
-  def value_given(self, state):
+  def value_given(self, state, internal_state, target_obj_hot):
     return tf.get_default_session().run(self.value,
                                         feed_dict={self.input_state: state,
+                                                   self.internal_state: internal_state,
+                                                   self.target_obj_hot: target_obj_hot,
                                                    base_network.IS_TRAINING: False})
-
 
 class NafNetwork(base_network.Network):
   def __init__(self, namespace,
                input_state, input_state_2,
                value_net, target_value_net,
+               internal_state, target_obj_hot,
                action_dim):
     super(NafNetwork, self).__init__(namespace)
 
@@ -156,10 +158,13 @@ class NafNetwork(base_network.Network):
     self.input_state_2 = input_state_2
     self.input_action = tf.placeholder(shape=[None, action_dim],
                                        dtype=tf.float32, name="input_action")
-    self.reward =  tf.placeholder(shape=[None, 1],
-                                  dtype=tf.float32, name="reward")
+    self.reward = tf.placeholder(shape=[None, 1],
+                                 dtype=tf.float32, name="reward")
     self.terminal_mask = tf.placeholder(shape=[None, 1],
                                         dtype=tf.float32, name="terminal_mask")
+
+    self.internal_state = internal_state
+    self.target_obj_hot = target_obj_hot
 
     # TODO: dont actually use terminal mask?
 
@@ -170,7 +175,8 @@ class NafNetwork(base_network.Network):
         if opts.share_input_state_representation:
           input_representation = value_net.input_state_representation
         else:
-          input_representation = self.input_state_network(self.input_state, opts)
+          input_representation = self.input_state_network(self.input_state, self.internal_state, self.target_obj_hot, opts)
+
         weights_initializer = tf.random_uniform_initializer(-0.001, 0.001)
         self.output_action = slim.fully_connected(scope='fc',
                                                   inputs=input_representation,
@@ -191,11 +197,12 @@ class NafNetwork(base_network.Network):
 
       # first the L lower triangular values; a network on top of the input state
       num_l_values = int((action_dim*(action_dim+1))/2)
+
       with tf.variable_scope("l_values"):
         if opts.share_input_state_representation:
           input_representation = value_net.input_state_representation
         else:
-          input_representation = self.input_state_network(self.input_state, opts)
+          input_representation = self.input_state_network(self.input_state, internal_state, target_obj_hot, opts)
         l_values = slim.fully_connected(scope='fc',
                                         inputs=input_representation,
                                         num_outputs=num_l_values,
@@ -224,6 +231,7 @@ class NafNetwork(base_network.Network):
       # and since leading axis in l was always the batch
       # we need to transpose it back to axis0 again
       L = tf.transpose(L, (1, 0, 2))  # (batch_size, action_dim, action_dim)
+
       self.check_L = tf.check_numerics(L, "L")
 
       # P is L.L_T
@@ -246,6 +254,7 @@ class NafNetwork(base_network.Network):
 
       # loss is squared difference that we want to minimise.
       self.loss = tf.reduce_mean(tf.pow(self.q_value - self.target_y, 2))
+
       with tf.variable_scope("optimiser"):
         # dynamically create optimiser based on opts
         optimiser = util.construct_optimiser(opts)
@@ -262,12 +271,14 @@ class NafNetwork(base_network.Network):
         checks.append(tf.check_numerics(op, name))
       self.check_numerics = tf.group(*checks)
 
-  def action_given(self, state, internal_state, target_obj, add_noise):
+  def action_given(self, state, internal_state, target_obj_hot, add_noise):
     # NOTE: noise is added _outside_ tf graph. we do this simply because the noisy output
     # is never used for any part of computation graph required for online training. it's
     # only used during training after being the replay buffer.
     actions = tf.get_default_session().run(self.output_action,
                                            feed_dict={self.input_state: [state],
+                                                      self.internal_state: [internal_state],
+                                                      self.target_obj_hot: [target_obj_hot],
                                                       base_network.IS_TRAINING: False})
 
     # May be input dimension problem
@@ -279,6 +290,13 @@ class NafNetwork(base_network.Network):
       actions = np.clip(1, -1, actions)  # action output is _always_ (-1, 1)
       if VERBOSE_DEBUG:
         print("TRAIN action_given pre_noise %s post_noise %s" % (pre_noise, actions))
+
+    actions = actions * 360.0
+
+    actions[0, 0] = (actions[0, 0] / 4.0) - 90
+    actions[0, 2] = actions[0, 2] /2.0
+    #actions[0, 2] = actions[0, 2] /2.0
+
     return actions
 
   def train(self, batch):
@@ -288,6 +306,8 @@ class NafNetwork(base_network.Network):
                                             self.reward: batch.reward,
                                             self.terminal_mask: batch.terminal_mask,
                                             self.input_state_2: batch.state_2,
+                                            self.internal_state: batch.internal_state,
+                                            self.target_obj_hot: batch.target_obj_hot,
                                             base_network.IS_TRAINING: True})
     return l
 
@@ -299,10 +319,11 @@ class NafNetwork(base_network.Network):
                                               self.reward: batch.reward,
                                               self.terminal_mask: batch.terminal_mask,
                                               self.input_state_2: batch.state_2,
+                                              self.internal_state: batch.internal_state,
+                                              self.target_obj_hot: batch.target_obj_hot,
                                               base_network.IS_TRAINING: False})
     values = [np.squeeze(v) for v in values]
     return values
-
 
 class NormalizedAdvantageFunctionAgent(object):
   def __init__(self, env):
@@ -327,18 +348,21 @@ class NormalizedAdvantageFunctionAgent(object):
 
     batched_internal_state_shape = [None] + temp
     internal_state = tf.placeholder(shape=batched_internal_state_shape, dtype=tf.float32)
+
+
     temp = [10]
     batched_taget_obj_shape = [None] + temp
-    target_obj = tf.placeholder(shape=batched_taget_obj_shape, dtype=tf.float32)
+    target_obj_hot = tf.placeholder(shape=batched_taget_obj_shape, dtype=tf.float32)
 
     # initialise base models for value & naf networks. value subportion of net is
     # explicitly created seperate because it has a target network note: in the case of
     # --share-input-state-representation the input state network of the value_net will
     # be reused by the naf.l_value and naf.output_actions net
-    self.value_net = ValueNetwork("value", s1, internal_state, target_obj, opts.hidden_layers)
-    self.target_value_net = ValueNetwork("target_value", s2, internal_state, target_obj, opts.hidden_layers)
+    self.value_net = ValueNetwork("value", s1, internal_state, target_obj_hot, opts.hidden_layers)
+    self.target_value_net = ValueNetwork("target_value", s2, internal_state, target_obj_hot, opts.hidden_layers)
     self.naf = NafNetwork("naf", s1, s2,
                           self.value_net, self.target_value_net,
+                          internal_state, target_obj_hot,
                           action_dim)
 
   def post_var_init_setup(self):
@@ -352,7 +376,6 @@ class NormalizedAdvantageFunctionAgent(object):
                                                     opts.target_update_rate)
 
   def one_hot_encode(self, x, n):
-
     return np.eye(n)[x]
 
   def run_training(self, max_num_actions, max_run_time, batch_size, batches_per_step,
@@ -397,54 +420,60 @@ class NormalizedAdvantageFunctionAgent(object):
             done = False
             step = 0
 
-            episode_start = time.time()
             while not done:
-              # choose action
-              internal_state = env.internal_state
-              target_obj = one_hot_list[target_obj_idx, :]
-              action = self.naf.action_given(state_1, internal_state, target_obj, add_noise=True) # Make action
-              # take action step in env
-              state_2, reward, done, _ = self.env.step(action, target_obj_idx)
-              rewards.append(reward)
-              # cache for adding to replay memory
-              action_reward_state_sequence.append((action, reward, np.copy(state_2)))
-              # roll state for next step.
-              state_1 = state_2
-            # at end of episode update replay memory
-            print("episode_took", time.time() - episode_start, len(rewards))
+                # choose action
+                internal_state = env.internal_state
+                target_obj_hot = one_hot_list[target_obj_idx, :]
+                action = self.naf.action_given(state_1, internal_state, target_obj_hot, add_noise=True) # Make action
+                # take action step in env
+                state_2, reward, done = self.env.step(action, target_obj_idx)
+                rewards.append(reward)
+                # cache for adding to replay memory
+                action_reward_state_sequence.append((action, reward, np.copy(state_2), internal_state, target_obj_hot))
+                # roll state for next step.
+                state_1 = state_2
 
-            replay_add_start = time.time()
-        self.replay_memory.add_episode(initial_state, action_reward_state_sequence)
-        print("replay_took", time.time() - replay_add_start)
+                step += 1
 
-      # do a training step (after waiting for buffer to fill a bit...)
-      if self.replay_memory.size() > opts.replay_memory_burn_in:
-        # run a set of batches
-        for _ in range(batches_per_step):
-          batch_start = time.time()
-          batch = self.replay_memory.batch(batch_size)
-          losses.append(self.naf.train(batch))
-          print("batch_took", time.time() - batch_start)
-        # update target nets
-        self.target_value_net.update_weights()
-        # do debug (if requested) on last batch
-        if VERBOSE_DEBUG:
-          print("-----")
-          print("> BATCH")
-          print("state_1", batch.state_1.T)
-          print("action\n", batch.action.T)
-          print("reward        ", batch.reward.T)
-          print("terminal_mask ", batch.terminal_mask.T)
-          print("state_2", batch.state_2.T)
-          print("< BATCH")
-          l_values, l, v, a, vp = self.naf.debug_values(batch)
-          print("> BATCH DEBUG VALUES")
-          print("l_values\n", l_values.T)
-          print("loss\t", l)
-          print("val\t" , np.mean(v), "\t", v.T)
-          print("adv\t", np.mean(a), "\t", a.T)
-          print("val'\t", np.mean(vp), "\t", vp.T)
-          print("< BATCH DEBUG VALUES")
+                print(step)
+
+                if step == opts.action_repeat_per_scene:
+                    done = True
+
+                # at end of episode update replay memory
+            self.replay_memory.add_episode(initial_state, action_reward_state_sequence)
+
+            if i > 1:
+              remove_obj_idx = random.randrange(0, i)
+              env.remove_obj(remove_obj_idx)
+
+            # do a training step (after waiting for buffer to fill a bit...)
+            if self.replay_memory.size() > opts.replay_memory_burn_in:
+                # run a set of batches
+                for _ in range(batches_per_step):
+                      batch = self.replay_memory.batch(batch_size)
+                      losses.append(self.naf.train(batch))
+                # update target nets
+                self.target_value_net.update_weights()
+
+            # do debug (if requested) on last batch
+                if VERBOSE_DEBUG:
+                  print("-----")
+                  print("> BATCH")
+                  print("state_1", batch.state_1.T)
+                  print("action\n", batch.action.T)
+                  print("reward        ", batch.reward.T)
+                  print("terminal_mask ", batch.terminal_mask.T)
+                  print("state_2", batch.state_2.T)
+                  print("< BATCH")
+                  l_values, l, v, a, vp = self.naf.debug_values(batch)
+                  print("> BATCH DEBUG VALUES")
+                  print("l_values\n", l_values.T)
+                  print("loss\t", l)
+                  print("val\t" , np.mean(v), "\t", v.T)
+                  print("adv\t", np.mean(a), "\t", a.T)
+                  print("val'\t", np.mean(vp), "\t", vp.T)
+                  print("< BATCH DEBUG VALUES")
 
       # dump some stats and progress info
       stats = collections.OrderedDict()
@@ -547,8 +576,9 @@ def main():
     env.shutdown()  # just to flush logging, clumsy :/
 
 if __name__ == "__main__":
-    try :
-        main()
-    except :
-        # TODO : Adds saver.
-        env.shutdown()
+    main()
+    # try :
+    #     main()
+    # except :
+    #     # TODO : Adds saver.
+    #     env.shutdown()
