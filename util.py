@@ -188,3 +188,6 @@ def render_action_to_png(step, action):
   lx, ly = int(25+(action[0][0]*25)), int(25+(action[0][1]*25))
   canvas.line((25,25, lx,ly), fill="black")
   img.save("/tmp/action_%03d.png" % step)
+
+def one_hot_encode(x):
+    return np.eye(len(x))[x]

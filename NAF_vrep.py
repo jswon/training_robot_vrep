@@ -55,7 +55,7 @@ parser.add_argument('--event-log-in', type=str, default=None,
                     help="prepopulate replay memory with entries from this event log")
 parser.add_argument('--replay-memory-size', type=int, default=11000,
                     help="max size of replay memory")
-parser.add_argument('--replay-memory-burn-in', type=int, default=10,
+parser.add_argument('--replay-memory-burn-in', type=int, default=100,
                     help="dont train from replay memory until it reaches this size")
 parser.add_argument('--eval-action-noise', action='store_true',
                     help="whether to use noise during eval")
@@ -110,7 +110,6 @@ signal.signal(signal.SIGUSR2, set_dump_weights)
 
 class ValueNetwork(base_network.Network):
   """ Value network component of a NAF network. Created as seperate net because it has a target network."""
-
   def __init__(self, namespace, input_state, internal_state, target_obj_hot, hidden_layer_config):
     super(ValueNetwork, self).__init__(namespace)
 
@@ -330,6 +329,7 @@ class NormalizedAdvantageFunctionAgent(object):
     self.env = env
     state_shape = self.env.state_shape
     action_dim = self.env.action_space.shape[1]
+    self.obj_list = [i for i in range(10)]
 
     # for now, with single machine synchronous training, use a replay memory for training.
     # TODO: switch back to async training with multiple replicas (as in drivebot project)
@@ -349,8 +349,7 @@ class NormalizedAdvantageFunctionAgent(object):
     batched_internal_state_shape = [None] + temp
     internal_state = tf.placeholder(shape=batched_internal_state_shape, dtype=tf.float32)
 
-
-    temp = [10]
+    temp = [10] # object one hot
     batched_taget_obj_shape = [None] + temp
     target_obj_hot = tf.placeholder(shape=batched_taget_obj_shape, dtype=tf.float32)
 
@@ -375,9 +374,6 @@ class NormalizedAdvantageFunctionAgent(object):
     self.target_value_net.set_as_target_network_for(self.value_net,
                                                     opts.target_update_rate)
 
-  def one_hot_encode(self, x, n):
-    return np.eye(n)[x]
-
   def run_training(self, max_num_actions, max_run_time, batch_size, batches_per_step,
                    saver_util):
     # log start time, in case we are limiting by time...
@@ -387,29 +383,29 @@ class NormalizedAdvantageFunctionAgent(object):
     num_actions_taken = 0
     n = 0
 
-    obj_list = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-    n_obj = 10
-    one_hot_list = self.one_hot_encode(obj_list, n_obj)
+    one_hot_list = util.one_hot_encode(self.obj_list)
 
     while True:
       rewards = []
       losses = []
+      remain_obj = [i for i in range(10)] # Remain object initialize.
 
       # run an episode
       if opts.dont_do_rollouts:
         # _not_ gathering experience online
         pass
       else:
-        env.shuffle_obj()
-        print('Shuffled objects')
+        env.shuffle_obj() # Tray Shuffle
 
-        obj_index = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        for _ in range(10): # object total num
+            target_obj_idx = self.obj_list.index(random.sample(remain_obj, 1)[0])
 
-        for i in range(10, 0, -1):
-            target_obj_idx = random.randrange(0, i)
-            objects_name = env.obj_list[target_obj_idx]
+            obj_name = env.obj_list[target_obj_idx]
+            print('Target object:', obj_name, file=sys.stderr)
 
-            print('Target object:', objects_name)
+            # Target object one hot
+            target_obj_hot = one_hot_list[target_obj_idx, :]
+
             # start a new episode
             state_1 = self.env.reset()
 
@@ -423,7 +419,6 @@ class NormalizedAdvantageFunctionAgent(object):
             while not done:
                 # choose action
                 internal_state = env.internal_state
-                target_obj_hot = one_hot_list[target_obj_idx, :]
                 action = self.naf.action_given(state_1, internal_state, target_obj_hot, add_noise=True) # Make action
                 # take action step in env
                 state_2, reward, done = self.env.step(action, target_obj_idx)
@@ -435,26 +430,38 @@ class NormalizedAdvantageFunctionAgent(object):
 
                 step += 1
 
-                print(step)
-
-                if step == opts.action_repeat_per_scene:
+                #if step == opts.action_repeat_per_scene:
+                if step == 10:
                     done = True
 
                 # at end of episode update replay memory
-            self.replay_memory.add_episode(initial_state, action_reward_state_sequence)
+                self.replay_memory.add_episode(initial_state, action_reward_state_sequence)
 
-            if i > 1:
-              remove_obj_idx = random.randrange(0, i)
-              env.remove_obj(remove_obj_idx)
+            # Random object remove
 
-            # do a training step (after waiting for buffer to fill a bit...)
+            if len(remain_obj) > 0:
+                # Target object remove version
+                remain_obj.remove(self.obj_list[target_obj_idx])
+                env.remove_obj(target_obj_idx)
+
+                ## Random object remove version
+                # rand_idx= self.obj_list.index(random.sample(remain_obj, 1)[0])
+                # remain_obj.remove(rand_idx)
+                # env.remove_obj(rand_idx)
+
+
+
+                # do a training step (after waiting for buffer to fill a bit...)
+
             if self.replay_memory.size() > opts.replay_memory_burn_in:
                 # run a set of batches
                 for _ in range(batches_per_step):
                       batch = self.replay_memory.batch(batch_size)
                       losses.append(self.naf.train(batch))
+
                 # update target nets
                 self.target_value_net.update_weights()
+                # TODO : Target Net update????? naf? value??? why
 
             # do debug (if requested) on last batch
                 if VERBOSE_DEBUG:
@@ -479,7 +486,7 @@ class NormalizedAdvantageFunctionAgent(object):
       stats = collections.OrderedDict()
       stats["time"] = time.time()
       stats["n"] = n
-      stats["mean_losses"] = float(np.mean(losses))
+      stats["mean_losses"] = float(np.mean(losses)) if len(losses) > 0 else 0
       stats["total_reward"] = np.sum(rewards)
       stats["episode_len"] = len(rewards)
       stats["replay_memory_stats"] = self.replay_memory.current_stats()
@@ -516,9 +523,12 @@ class NormalizedAdvantageFunctionAgent(object):
       total_reward = 0
       steps = 0
       done = False
+      internal_state = env.internal_state
+      target_obj_hot = env.target_obj_hot
+
       while not done:
-        action = self.naf.action_given(state, add_noise)
-        state, reward, done, _ = self.env.step(action)
+        action = self.naf.action_given(state, internal_state, target_obj_hot, add_noise)
+        state, reward, done = self.env.step(action)
         print("EVALSTEP e%d s%d action=%s (l2=%s) => reward %s" % (i, steps, action,
                                                                    np.linalg.norm(action), reward))
         total_reward += reward

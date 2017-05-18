@@ -47,7 +47,7 @@ def add_opts(parser):
 class sim_env(object):
     def __init__(self, opts):
         self.clientID = -1
-        self.obj_list = obj_list
+        self.obj_list = OBJ_LIST
         self.handle_obj = HANDLE_OBJ_LIST
         self.handle_robot = HANDLE_ROBOT
         self.handle_joint = HANDLE_JOINT_LIST
@@ -165,27 +165,19 @@ class sim_env(object):
 
         if obj_pos[2] > endEffector_pos[2]:
             reward = -100
-
-            #        print('dist=',dist)
-            #        reward = math.sqrt(1.0/dist)
-            #        print('reward=', reward)
-            #        reward = math.exp(reward) - 1
-
         ########################
 
+        self.cur_end_effector_pos = self.get_end_pos()
+        self.cur_joint_angles = self.get_joint()
 
         if self.opts.use_full_internal_state:
-            prev_end_effector_pos = self.cur_end_effector_pos
-            self.cur_end_effector_pos = np.asarray(endEffector_pos)
-            self.end_effector_vel = self.cur_end_effector_pos - prev_end_effector_pos
-            prev_joint_angles = self.cur_joint_angles
-            self.cur_joint_angles = self.get_joint()
-            self.joint_angles_vel = self.cur_joint_angles - prev_joint_angles
             self.internal_state = np.concatenate(
                 (self.cur_joint_angles, self.joint_angles_vel, self.cur_end_effector_pos, self.end_effector_vel))
         else:
             self.internal_state = np.concatenate((self.cur_joint_angles, self.cur_end_effector_pos))
 
+
+        ###### Collision Check ##############
         collision_type = self.collision_read()
 
         if collision_type == 1:
@@ -231,7 +223,7 @@ class sim_env(object):
         # End effector Handle
         self.handle_end = vrep.simxGetObjectHandle(self.clientID, 'End_Effector', vrep.simx_opmode_blocking)[1]
         # Object Handle
-        for i in obj_list:
+        for i in OBJ_LIST:
             self.handle_obj.append(vrep.simxGetObjectHandle(self.clientID, i, vrep.simx_opmode_blocking)[1])
         # UR3 Joint Handle
         for i in range(6):
