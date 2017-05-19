@@ -172,7 +172,7 @@ class Network(object):
     model = slim.max_pool2d(model, kernel_size=[2, 2], scope='pool2')
     self.pool3 = model
 
-    print(model.name)
+   # print(model.name)
 #    print >>sys.stderr, "pool3", util.shape_and_product_of(model)
 
     return model

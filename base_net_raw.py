@@ -22,7 +22,7 @@ class Network(object):
     assert affine_combo_coeff >= 0.0 and affine_combo_coeff <= 1.0
     assign_ops = []
     with tf.variable_scope(self.namespace, reuse=True):
-      for src_var in tf.global_variables():
+      for src_var in tf.all_variables():
         if not src_var.name.startswith(source_namespace):
           continue
         target_var_name = src_var.name.replace(source_namespace+"/", "").replace(":0", "")
@@ -50,71 +50,32 @@ class Network(object):
 
   def trainable_model_vars(self):
     v = []
-    for var in tf.global_variables():
+    for var in tf.all_variables():
       if var.name.startswith(self.namespace):
         v.append(var)
     return v
 
-  def simple_value_fc_net_on(self, flat_conv_net, internal_state, target_obj_hot, opts):
+  def hidden_layers_starting_at(self, layer, layer_sizes, opts=None):
     # TODO: opts=None => will force exception on old calls....
+    if not isinstance(layer_sizes, list):
+      layer_sizes = list(map(int, layer_sizes.split(",")))
 
-    normalizer_fn = None
-    normalizer_params = None
 
-    hidden1 = slim.fully_connected(flat_conv_net, 200, weights_regularizer=tf.contrib.layers.l2_regularizer(0.01),
-                                   activation_fn=tf.nn.relu,
-                                   normalizer_fn=normalizer_fn,
-                                   normalizer_params=normalizer_params,
-                                   scope='hidden1')
-
-    concat_inputs = tf.concat([hidden1, internal_state], 1)
-    concat_inputs = tf.concat([concat_inputs, target_obj_hot], 1)
-
-    hidden2 = slim.fully_connected(concat_inputs, 200, weights_regularizer=tf.contrib.layers.l2_regularizer(0.01),
-                                   activation_fn=tf.nn.relu,
-                                   normalizer_fn=normalizer_fn,
-                                   normalizer_params=normalizer_params,
-                                   scope='hidden2')
-    final_hidden = slim.fully_connected(hidden2, 50, weights_regularizer=tf.contrib.layers.l2_regularizer(0.01),
-                                        activation_fn=tf.nn.relu,
-                                        normalizer_fn=normalizer_fn,
-                                        normalizer_params=normalizer_params,
-                                        scope="hidden3")
-    return final_hidden
-
-  def simple_NAF_fc_net_on(self, flat_conv_net, internal_state, target_obj_hot, opts):
-    # TODO: opts=None => will force exception on old calls....
-    normalizer_fn = None
-    normalizer_params = None
-
-    hidden1 = slim.fully_connected(flat_conv_net, 200, weights_regularizer=tf.contrib.layers.l2_regularizer(0.01),
-                                   activation_fn=tf.nn.relu,
-                                   normalizer_fn=normalizer_fn,
-                                   normalizer_params=normalizer_params,
-                                   scope='hidden1')
-
-    # Hidden layer 1 + internal_state
-    concat_inputs = tf.concat([hidden1, internal_state], 1)
-    concat_inputs = tf.concat([concat_inputs, target_obj_hot], 1)
-
-    hidden2 = slim.fully_connected(concat_inputs, 200, weights_regularizer=tf.contrib.layers.l2_regularizer(0.01),
-                                   activation_fn=tf.nn.relu,
-                                   normalizer_fn=normalizer_fn,
-                                   normalizer_params=normalizer_params,
-                                   scope='hidden2')
-
-    final_hidden = slim.fully_connected(hidden2, 50, weights_regularizer=tf.contrib.layers.l2_regularizer(0.01),
-                                        activation_fn=tf.nn.relu,
-                                        normalizer_fn=normalizer_fn,
-                                        normalizer_params=normalizer_params,
-                                        scope="hidden3")
-
-    return final_hidden
+    assert len(layer_sizes) > 0
+    for i, size in enumerate(layer_sizes):
+      layer = slim.fully_connected(scope="h%d" % i,
+                                  inputs=layer,
+                                  num_outputs=size,
+                                  weights_regularizer=tf.contrib.layers.l2_regularizer(0.01),
+                                  activation_fn=tf.nn.relu)
+      #if opts.use_dropout:
+      #  layer = slim.dropout(layer, is_training=IS_TRAINING, scope="do%d" % i)
+    return layer
 
   def simple_conv_net_on(self, input_layer, opts):
     if opts.use_batch_norm:
       normalizer_fn = slim.batch_norm
-      normalizer_params = {'is_training': IS_TRAINING }
+      normalizer_params = { 'is_training': IS_TRAINING }
     else:
       normalizer_fn = None
       normalizer_params = None
@@ -129,7 +90,7 @@ class Network(object):
     height, width = map(int, input_layer.get_shape()[1:3])
     num_channels = input_layer.get_shape()[3:].num_elements()
     input_layer = tf.reshape(input_layer, [-1, height, width, num_channels])
-    print(self.namespace, " : input_layer", util.shape_and_product_of(input_layer), file=sys.stderr)
+    print("input_layer", util.shape_and_product_of(input_layer), file=sys.stderr)
 
     # whiten image, per channel, using batch_normalisation layer with
     # params calculated directly from batch.
@@ -151,11 +112,11 @@ class Network(object):
 
     model = slim.conv2d(model, num_outputs=10, kernel_size=[5, 5],
                         normalizer_fn=normalizer_fn,
-                          normalizer_params=normalizer_params,
+                        normalizer_params=normalizer_params,
                         scope='conv2')
     model = slim.max_pool2d(model, kernel_size=[2, 2], scope='pool2')
     self.pool2 = model
-    print("pool2", util.shape_and_product_of(model),file=sys.stderr)
+    print("pool2", util.shape_and_product_of(model), file=sys.stderr)
 
     model = slim.conv2d(model, num_outputs=10, kernel_size=[3, 3],
                         normalizer_fn=normalizer_fn,
@@ -163,21 +124,16 @@ class Network(object):
                         scope='conv3')
     model = slim.max_pool2d(model, kernel_size=[2, 2], scope='pool2')
     self.pool3 = model
-    print("pool3", util.shape_and_product_of(model),file=sys.stderr)
+    print("pool3", util.shape_and_product_of(model), file=sys.stderr)
 
     return model
 
-  def input_state_network(self, input_state, internal_state, target_obj_hot, opts):
-    input_state = self.simple_conv_net_on(input_state, opts)
-
+  def input_state_network(self, input_state, opts):
+    # TODO: use in lrpg and ddpg too
+    if opts.use_raw_pixels:
+      input_state = self.simple_conv_net_on(input_state, opts)
     flattened_input_state = slim.flatten(input_state, scope='flat')
-
-    if self.namespace is 'naf' :
-        final_layer = self.simple_NAF_fc_net_on(flattened_input_state, internal_state, target_obj_hot, opts)
-    else :
-        final_layer = self.simple_value_fc_net_on(flattened_input_state, internal_state, target_obj_hot, opts)
-
-    return final_layer
+    return self.hidden_layers_starting_at(flattened_input_state, opts.hidden_layers, opts)
 
   def render_convnet_activations(self, activations, filename_base):
     _batch, height, width, num_filters = activations.shape

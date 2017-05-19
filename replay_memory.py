@@ -6,7 +6,9 @@ import tensorflow as tf
 import time
 import util
 
-Batch = collections.namedtuple("Batch", "state_1 action reward terminal_mask state_2 internal_state target_obj_hot")
+#Batch = collections.namedtuple("Batch", "state_1 action reward terminal_mask state_2 internal_state target_obj_hot")
+Batch = collections.namedtuple("Batch", "state_1 action reward terminal_mask state_2")
+
 
 class ReplayMemory(object):
   def __init__(self, buffer_size, state_shape, action_dim, opts, load_factor=1.5):
@@ -36,7 +38,11 @@ class ReplayMemory(object):
     # are stored in a separate matrix. it is sized fractionally larger than the replay
     # memory since a rollout of length n contains n+1 states.
     self.state_buffer_size = int(buffer_size*load_factor)
-    shape = [self.state_buffer_size] + list(state_shape)
+    if opts.use_raw_pixels :
+      shape = [self.state_buffer_size] + list(state_shape)
+    else :
+      shape = [self.state_buffer_size] + [9]
+    #shape = [self.state_buffer_size]+list((3,2,7))
     self.state = np.empty(shape, dtype=np.float16)
 
     # keep track of free slots in state buffer
